@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Кабинет Врача | Телемед</title>
+  <style>
+    :root { --primary: #0284c7; --bg: #f8fafc; --card: #ffffff; --text: #0f172a; --border: #e2e8f0; --success: #10b981; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: var(--bg); color: var(--text); padding: 20px; max-width: 1200px; margin: 0 auto; }
+    header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+    .badge { background: #e0f2fe; color: #0369a1; padding: 4px 12px; border-radius: 999px; font-weight: 600; font-size: 14px; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 20px; margin-bottom: 20px; }
+    .room-bar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+    .code-box { font-family: monospace; font-size: 20px; font-weight: 700; background: #f1f5f9; padding: 6px 16px; border-radius: 8px; letter-spacing: 1px; }
+    .btn { background: var(--primary); color: #fff; border: none; padding: 10px 18px; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; }
+    .btn:disabled { opacity: 0.5; }
+
+    .layout { display: grid; grid-template-columns: 2fr 1fr; gap: 20px; }
+    @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
+
+    .video-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    @media (max-width: 600px) { .video-grid { grid-template-columns: 1fr; } }
+    .video-box { position: relative; background: #000; border-radius: 12px; overflow: hidden; aspect-ratio: 4/3; }
+    video { width: 100%; height: 100%; object-fit: cover; }
+    .label { position: absolute; bottom: 8px; left: 8px; background: rgba(0,0,0,0.6); color: #fff; padding: 4px 10px; border-radius: 6px; font-size: 12px; }
+    .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #94a3b8; margin-right: 6px; }
+    .status-dot.active { background: var(--success); }
+
+    /* Панель анализа лица */
+    .analysis-monitor { background: #000; border-radius: 8px; overflow: hidden; aspect-ratio: 4/3; display: flex; align-items: center; justify-content: center; position: relative; }
+    .analysis-monitor img { width: 100%; height: 100%; object-fit: cover; }
+    .analysis-info { margin-top: 12px; font-size: 14px; display: flex; justify-content: space-between; }
+  </style>
+</head>
+<body>
+
+  <header>
+    <h2>🩺 Кабинет Врача</h2>
+    <span class="badge">Врач (Host)</span>
+  </header>
+
+  <div class="card room-bar">
+    <div style="display:flex; align-items:center; gap: 12px;">
+      <span>Код консультации:</span>
+      <span class="code-box" id="roomCode">НЕТ</span>
+      <button class="btn" style="background:#64748b;" id="btnCopy" onclick="copyCode()" disabled>Копировать</button>
+    </div>
+    <div>
+      <span class="status-dot" id="dot"></span>
+      <span id="status">Нажмите для старта</span>
+      <button class="btn" id="btnStart" onclick="startSession()" style="margin-left: 12px;">Создать комнату</button>
+    </div>
+  </div>
+
+  <div class="layout">
+    <!-- Прямой WebRTC поток -->
+    <div class="card">
+      <h3 style="margin-bottom: 16px; font-size: 16px;">Видеосвязь (Прямой поток WebRTC)</h3>
+      <div class="video-grid">
+        <div class="video-box">
+          <video id="localVideo" autoplay playsinline muted></video>
+          <div class="label">Вы (Врач)</div>
+        </div>
+        <div class="video-box">
+          <video id="remoteVideo" autoplay playsinline></video>
+          <div class="label">Пациент</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Результат анализа лица сервером -->
+    <div class="card">
+      <h3 style="margin-bottom: 16px; font-size: 16px;">Детекция лица (Сервер OpenCV)</h3>
+      <div class="analysis-monitor">
+        <img id="analysisImg" alt="Ожидание кадра от пациента..." style="display:none;">
+        <span id="placeholderText" style="color: #64748b; font-size: 13px;">Ожидание кадров...</span>
+      </div>
+      <div class="analysis-info">
+        <span>Лицо в кадре: <strong id="faceState">—</strong></span>
+        <span style="color:#64748b;" id="analysisTime">—:—:—</span>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let room = null, token = null, pc = null, localStream = null, eventIndex = 0;
+    const iceQueue = [];
+    const rtcConfig = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+
+    function setStatus(text, active=false) {
+      document.getElementById('status').innerText = text;
+      document.getElementById('dot').className = 'status-dot' + (active ? ' active' : '');
+    }
+
+    async function startSession() {
+      document.getElementById('btnStart').disabled = true;
+      setStatus('Включение камеры...');
+
+      try {
+        localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        document.getElementById('localVideo').srcObject = localStream;
+      } catch (e) {
+        alert('Ошибка доступа к камере: ' + e.message);
+        document.getElementById('btnStart').disabled = false;
+        return;
+      }
+
+      setStatus('Создание комнаты...');
+      const res = await fetch('/rooms', { method: 'POST' });
+      const data = await res.json();
+      room = data.room;
+      token = data.token;
+
+      document.getElementById('roomCode').innerText = room;
+      document.getElementById('btnCopy').disabled = false;
+      setStatus('Ждём пациента...');
+
+      setupWebRTC();
+      setInterval(pollEvents, 1000);
+    }
+
+    function copyCode() {
+      navigator.clipboard.writeText(room);
+      alert('Код ' + room + ' скопирован!');
+    }
+
+    async function setupWebRTC() {
+      pc = new RTCPeerConnection(rtcConfig);
+      localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+
+      pc.ontrack = (event) => {
+        document.getElementById('remoteVideo').srcObject = event.streams[0];
+        setStatus('Связь установлена (P2P)', true);
+      };
+
+      pc.onicecandidate = (event) => {
+        if (event.candidate) sendSignal({ type: 'ice', candidate: event.candidate });
+      };
+
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      sendSignal({ type: 'offer', sdp: offer });
+    }
+
+    async function sendSignal(payload) {
+      await fetch(`/rooms/${room}/events`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify(payload)
+      });
+    }
+
+    async function pollEvents() {
+      if (!token) return;
+      const res = await fetch(`/rooms/${room}/events?after=${eventIndex}`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      const data = await res.json();
+      eventIndex = data.next_index;
+
+      for (const ev of data.events) {
+        if (ev.type === 'answer') {
+          await pc.setRemoteDescription(new RTCSessionDescription(ev.sdp));
+          while (iceQueue.length) await pc.addIceCandidate(iceQueue.shift());
+        } else if (ev.type === 'ice') {
+          if (!pc.remoteDescription) iceQueue.push(new RTCIceCandidate(ev.candidate));
+          else await pc.addIceCandidate(new RTCIceCandidate(ev.candidate));
+        } else if (ev.type === 'face_analysis') {
+          // Получен кадр с выделенным лицом от сервера
+          const img = document.getElementById('analysisImg');
+          img.src = ev.data.image;
+          img.style.display = 'block';
+          document.getElementById('placeholderText').style.display = 'none';
+
+          document.getElementById('faceState').innerText = ev.data.face_detected ? `Да (${ev.data.faces_count})` : 'Нет';
+          document.getElementById('faceState').style.color = ev.data.face_detected ? '#10b981' : '#ef4444';
+          document.getElementById('analysisTime').innerText = ev.data.timestamp;
+        }
+      }
+    }
+  </script>
+</body>
+</html>
